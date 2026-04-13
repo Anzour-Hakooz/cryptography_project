@@ -45,24 +45,144 @@ onMounted(() => {
   fetchActiveUsers();
 });
 
+// --- FROM SCRATCH RSA MATH FUNCTIONS ---
+
+// 1. Modular Exponentiation: (base^exp) % mod
+// Using Square-and-Multiply method to prevent BigInt memory overflow
+const modPow = (base, exp, mod) => {
+  let res = 1n;
+  base = base % mod;
+  while (exp > 0n) {
+    if (exp % 2n === 1n) res = (res * base) % mod;
+    base = (base * base) % mod;
+    exp = exp / 2n;
+  }
+  return res;
+};
+
+// 2. Secure Random BigInt Generator up to a max value
+const bigIntRandom = (max) => {
+  const maxHex = max.toString(16);
+  // Array of random bytes based on length
+  const bytes = new Uint8Array(Math.ceil(maxHex.length / 2));
+  window.crypto.getRandomValues(bytes);
+  let hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return BigInt('0x' + hex) % max;
+};
+
+// 3. Miller-Rabin Primality Test
+// Checks if a number 'n' is prime purely mathematically
+const isProbablePrime = (n, k = 5) => {
+  if (n === 2n || n === 3n) return true;
+  if (n <= 1n || n % 2n === 0n) return false;
+
+  let d = n - 1n;
+  let s = 0n;
+  while (d % 2n === 0n) {
+    d /= 2n;
+    s += 1n;
+  }
+
+  for (let i = 0; i < k; i++) {
+    // Generate random 'a' in [2, n - 2]
+    let a = 2n + bigIntRandom(n - 4n);
+    let x = modPow(a, d, n);
+    if (x === 1n || x === n - 1n) continue;
+
+    let composite = true;
+    for (let r = 1n; r < s; r++) {
+      x = modPow(x, 2n, n);
+      if (x === n - 1n) {
+        composite = false;
+        break;
+      }
+    }
+    if (composite) return false;
+  }
+  return true;
+};
+
+// 4. Prime Number Generator (bits)
+// Loops until it mathematical finds a prime number
+const generatePrime = (bits) => {
+  const min = 2n ** BigInt(bits - 1);
+  const max = (2n ** BigInt(bits)) - 1n;
+  while (true) {
+    let p = min + bigIntRandom(max - min);
+    if (p % 2n === 0n) p++; // ensure odd number
+    if (isProbablePrime(p, 5)) return p;
+  }
+};
+
+// 5. Extended Euclidean Algorithm for Modular Inverse
+// Used to generate the private key 'd' mathematically from e and phi
+const modInverse = (a, m) => {
+  let m0 = m;
+  let y = 0n, x = 1n;
+  if (m === 1n) return 0n;
+
+  while (a > 1n) {
+    let q = a / m;
+    let t = m;
+    m = a % m;
+    a = t;
+    t = y;
+    y = x - q * y;
+    x = t;
+  }
+  if (x < 0n) x += m0;
+  return x;
+};
+
+// --- DATA CONVERSION UTILS ---
+
+// Converts a raw File/ArrayBuffer into a BigInt by parsing hex bytes
+const bufferToBigInt = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return BigInt('0x' + hex);
+};
+
+// Converts a BigInt back into an ArrayBuffer
+const bigIntToBuffer = (bigint) => {
+  let hex = bigint.toString(16);
+  if (hex.length % 2 !== 0) hex = '0' + hex; // Pad if odd length
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes.buffer;
+};
+
 // Step 1: Register
 const generateAndRegister = async () => {
   try {
-    registerStatus.value = 'Generating keys...';
+    registerStatus.value = 'Generating 2048-bit keys mathematically (may take a moment)...';
 
-    // generate standard RSA key pair
-    const keyPair = await window.crypto.subtle.generateKey(
-      { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
-      true,
-      ["encrypt", "decrypt"]
-    );
+    // Give UI time to update text before blocking thread
+    await new Promise(r => setTimeout(r, 100));
 
-    // export to jwk format
-    const publicKey = await window.crypto.subtle.exportKey("jwk", keyPair.publicKey);
-    const privateKey = await window.crypto.subtle.exportKey("jwk", keyPair.privateKey);
+    // MATH: Generate p and q (1024-bit primes)
+    const p = generatePrime(1024);
+    const q = generatePrime(1024);
+
+    // MATH: Calculate n and phi
+    const n = p * q;
+    const phi = (p - 1n) * (q - 1n);
+
+    // MATH: Define e and calculate d (private key)
+    const e = 65537n;
+    const d = modInverse(e, phi);
+
+    // stringify keys to avoid JS number float precision loss
+    const publicKey = JSON.stringify({ e: e.toString(), n: n.toString() });
+    const privateKey = JSON.stringify({ d: d.toString(), n: n.toString() });
 
     // save private key locally
-    localStorage.setItem(`privateKey_${myUsername.value}`, JSON.stringify(privateKey));
+    localStorage.setItem(`privateKey_${myUsername.value}`, privateKey);
 
     // send public key to the server
     const response = await fetch('http://localhost:3000/api/keys', {
@@ -77,6 +197,7 @@ const generateAndRegister = async () => {
     }
   } catch (error) {
     registerStatus.value = 'Error generating keys.';
+    console.error(error);
   }
 };
 
@@ -95,32 +216,36 @@ const encryptAndShare = async () => {
     if (!res.ok) throw new Error("User not found");
 
     const { publicKey: recipientKeyText } = await res.json();
+    const recipientKeyObj = JSON.parse(recipientKeyText);
 
-    // jwk = JSON Web Key
-    // convert jwk string back to crypto key
-    const recipientPublicKey = await window.crypto.subtle.importKey(
-      "jwk", recipientKeyText, { name: "RSA-OAEP", hash: "SHA-256" }, true, ["encrypt"]
-    );
+    // Convert back from string to BigInt
+    const e = BigInt(recipientKeyObj.e);
+    const n = BigInt(recipientKeyObj.n);
 
     shareStatus.value = 'Encrypting file directly with RSA...';
 
     // convert file to array buffer (raw bytes) so we can do math on it
     const fileBuffer = await fileToShare.value.arrayBuffer();
 
-    // encrypt the file buffering using their RSA public key directly
-    const encryptedFile = await window.crypto.subtle.encrypt(
-      { name: "RSA-OAEP" }, recipientPublicKey, fileBuffer
-    );
+    // Convert raw bytes to a single giant BigInt number
+    const m = bufferToBigInt(fileBuffer);
+
+    if (m >= n) {
+      shareStatus.value = "Error: File content numerical value is larger than modulus.";
+      return;
+    }
+
+    // MATH: The core RSA encryption formula directly!
+    // c = m^e (mod n)
+    const c = modPow(m, e, n);
 
     shareStatus.value = 'Uploading...';
-    // basically creates a 'temporary & invisible' HTML form to upload the file
+    // creates a form to upload the file
     const formData = new FormData();
     formData.append('recipient', recipientUsername.value);
 
-    // create a blob from the encrypted file
-    const fileBlob = new Blob([encryptedFile]);
-
-    // append the blob to the form data
+    // Represent the ciphertext purely as its stringified integer text inside a blob
+    const fileBlob = new Blob([c.toString()]);
     formData.append('encryptedFile', fileBlob, fileToShare.value.name);
 
     // send to post request to the api
@@ -156,34 +281,32 @@ const checkInbox = async () => {
 // Decrypt helper
 const downloadAndDecrypt = async (fileRecord) => {
   try {
-    downloadStatus.value = `Downloading ${fileRecord}...`;
+    downloadStatus.value = `Downloading ${fileRecord.originalName}...`;
 
-    // fetch the raw encrypted file
+    // fetch the raw encrypted file text (which is just a massive integer string)
     const fileRes = await fetch(`http://localhost:3000/api/files/download/${fileRecord.fileId}`);
-    // bundles the packets to form the decrypted file
-    const encryptedBlob = await fileRes.blob();
-    // convert blob to array buffer (raw bytes)
-    const encryptedFile = await encryptedBlob.arrayBuffer();
+    const ciphertextString = await fileRes.text();
+    const c = BigInt(ciphertextString);
 
     // get my local private key
     const privateKeyText = localStorage.getItem(`privateKey_${myUsername.value}`);
     if (!privateKeyText) throw new Error("Private key missing");
 
+    const myPrivateKeyObj = JSON.parse(privateKeyText);
+    const d = BigInt(myPrivateKeyObj.d);
+    const n = BigInt(myPrivateKeyObj.n);
+
     downloadStatus.value = 'Decrypting file directly with RSA...';
 
-    // importing and parsing the key (formatting the key to be used by the crypto api)
-    const myPrivateKey = await window.crypto.subtle.importKey(
-      "jwk", JSON.parse(privateKeyText), { name: "RSA-OAEP", hash: "SHA-256" }, true, ["decrypt"]
-    );
+    // MATH: The core RSA decryption formula directly!
+    // m = c^d (mod n)
+    const m = modPow(c, d, n);
 
-    // directly decrypt the file itself using the user's RSA private key
-    const decryptedFile = await window.crypto.subtle.decrypt(
-      { name: "RSA-OAEP" }, myPrivateKey, encryptedFile
-    );
+    // Convert mathematically decrypted BigInt back into file raw buffer
+    const decryptedFileBuffer = bigIntToBuffer(m);
 
     // prompt download in browser window
-    // re-bundles the bytes into a file
-    const blob = new Blob([decryptedFile]);
+    const blob = new Blob([decryptedFileBuffer]);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
