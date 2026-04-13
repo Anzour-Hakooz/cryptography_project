@@ -12,6 +12,7 @@ const shareStatus = ref('');
 
 const myInbox = ref([]);
 const downloadStatus = ref('');
+const signatureDetails = ref(null);
 
 // get active users from backend
 const fetchActiveUsers = async () => {
@@ -30,8 +31,10 @@ const handleFileChange = (event) => {
   const file = event.target.files[0];
 
   // strict limit because pure RSA can only encrypt small payloads
+  // Even with simple textbook RSA, encrypting large files character-by-character
+  // would create massive files, so keeping a limit is good practice.
   if (file && file.size > 190) {
-    shareStatus.value = "Error: File is too large! Must be 190 bytes (characters) or less for pure RSA.";
+    shareStatus.value = "Error: File is too large! Must be 190 bytes (characters) or less for textbook RSA.";
     event.target.value = ''; // clear the input
     fileToShare.value = null;
     return;
@@ -45,10 +48,10 @@ onMounted(() => {
   fetchActiveUsers();
 });
 
-// --- FROM SCRATCH RSA MATH FUNCTIONS ---
+// --- TEXTBOOK RSA MATH FUNCTIONS ---
 
 // 1. Modular Exponentiation: (base^exp) % mod
-// Using Square-and-Multiply method to prevent BigInt memory overflow
+// Required because base^exp can be massive, so we square-and-multiply
 const modPow = (base, exp, mod) => {
   let res = 1n;
   base = base % mod;
@@ -60,131 +63,72 @@ const modPow = (base, exp, mod) => {
   return res;
 };
 
-// 2. Secure Random BigInt Generator up to a max value
-const bigIntRandom = (max) => {
-  const maxHex = max.toString(16);
-  // Array of random bytes based on length
-  const bytes = new Uint8Array(Math.ceil(maxHex.length / 2));
-  window.crypto.getRandomValues(bytes);
-  let hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  return BigInt('0x' + hex) % max;
+// 2. Simple Prime Checker
+// Checks mathematically using basic division if a number is prime
+const isPrime = (num) => {
+  for (let i = 2; i <= Math.sqrt(num); i++) {
+    if (num % i === 0) return false;
+  }
+  return num > 1;
 };
 
-// 3. Miller-Rabin Primality Test
-// Checks if a number 'n' is prime purely mathematically
-const isProbablePrime = (n, k = 5) => {
-  if (n === 2n || n === 3n) return true;
-  if (n <= 1n || n % 2n === 0n) return false;
-
-  let d = n - 1n;
-  let s = 0n;
-  while (d % 2n === 0n) {
-    d /= 2n;
-    s += 1n;
-  }
-
-  for (let i = 0; i < k; i++) {
-    // Generate random 'a' in [2, n - 2]
-    let a = 2n + bigIntRandom(n - 4n);
-    let x = modPow(a, d, n);
-    if (x === 1n || x === n - 1n) continue;
-
-    let composite = true;
-    for (let r = 1n; r < s; r++) {
-      x = modPow(x, 2n, n);
-      if (x === n - 1n) {
-        composite = false;
-        break;
-      }
-    }
-    if (composite) return false;
-  }
-  return true;
-};
-
-// 4. Prime Number Generator (bits)
-// Loops until it mathematical finds a prime number
-const generatePrime = (bits) => {
-  const min = 2n ** BigInt(bits - 1);
-  const max = (2n ** BigInt(bits)) - 1n;
+// 3. Simple Random Prime Generator
+// Generates primes inside a range large enough to support up to 16-bit characters (65535)
+// So our 'n' will be safely larger than any single text character!
+const generatePrime = () => {
   while (true) {
-    let p = min + bigIntRandom(max - min);
-    if (p % 2n === 0n) p++; // ensure odd number
-    if (isProbablePrime(p, 5)) return p;
+    // Generate random number between 1000 and 5000
+    let p = Math.floor(Math.random() * 4000) + 1000;
+    if (isPrime(p)) return BigInt(p);
   }
 };
 
-// 5. Extended Euclidean Algorithm for Modular Inverse
-// Used to generate the private key 'd' mathematically from e and phi
-const modInverse = (a, m) => {
-  let m0 = m;
-  let y = 0n, x = 1n;
-  if (m === 1n) return 0n;
+// 4. Extended Euclidean Algorithm
+// Determines the private key 'd' relative to 'e' and 'phi'
+const modInverse = (e, phi) => {
+  let old_r = e, r = phi;
+  let old_s = 1n, s = 0n;
 
-  while (a > 1n) {
-    let q = a / m;
-    let t = m;
-    m = a % m;
-    a = t;
-    t = y;
-    y = x - q * y;
-    x = t;
+  while (r > 0n) {
+    let quotient = old_r / r;
+
+    let temp_r = r;
+    r = old_r - quotient * r;
+    old_r = temp_r;
+
+    let temp_s = s;
+    s = old_s - quotient * s;
+    old_s = temp_s;
   }
-  if (x < 0n) x += m0;
-  return x;
-};
-
-// --- DATA CONVERSION UTILS ---
-
-// Converts a raw File/ArrayBuffer into a BigInt by parsing hex bytes
-const bufferToBigInt = (buffer) => {
-  const bytes = new Uint8Array(buffer);
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0');
-  }
-  return BigInt('0x' + hex);
-};
-
-// Converts a BigInt back into an ArrayBuffer
-const bigIntToBuffer = (bigint) => {
-  let hex = bigint.toString(16);
-  if (hex.length % 2 !== 0) hex = '0' + hex; // Pad if odd length
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes.buffer;
+  if (old_s < 0n) old_s += phi;
+  return old_s;
 };
 
 // Step 1: Register
 const generateAndRegister = async () => {
   try {
-    registerStatus.value = 'Generating 2048-bit keys mathematically (may take a moment)...';
+    registerStatus.value = 'Generating textbook keys...';
 
-    // Give UI time to update text before blocking thread
-    await new Promise(r => setTimeout(r, 100));
+    // MATH: Generate p and q (Small primes between 1000 and 5000)
+    const p = generatePrime();
+    const q = generatePrime();
 
-    // MATH: Generate p and q (1024-bit primes)
-    const p = generatePrime(1024);
-    const q = generatePrime(1024);
-
-    // MATH: Calculate n and phi
+    // MATH: Calculate n (modulus) and phi (Euler's totient)
     const n = p * q;
     const phi = (p - 1n) * (q - 1n);
 
-    // MATH: Define e and calculate d (private key)
+    // MATH: Define e (public exponent) and calculate d (private key exponent)
     const e = 65537n;
     const d = modInverse(e, phi);
 
-    // stringify keys to avoid JS number float precision loss
+    // Grouping keys
     const publicKey = JSON.stringify({ e: e.toString(), n: n.toString() });
     const privateKey = JSON.stringify({ d: d.toString(), n: n.toString() });
 
-    // save private key locally
+    // Save private key safely
     localStorage.setItem(`privateKey_${myUsername.value}`, privateKey);
 
-    // send public key to the server
+    // Send public key to the central server
     const response = await fetch('http://localhost:3000/api/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -211,44 +155,60 @@ const encryptAndShare = async () => {
   try {
     shareStatus.value = 'Fetching recipient public key...';
 
-    // get friend's public key
+    // Get friend's public key
     const res = await fetch(`http://localhost:3000/api/keys/${recipientUsername.value}`);
     if (!res.ok) throw new Error("User not found");
 
     const { publicKey: recipientKeyText } = await res.json();
     const recipientKeyObj = JSON.parse(recipientKeyText);
 
-    // Convert back from string to BigInt
     const e = BigInt(recipientKeyObj.e);
     const n = BigInt(recipientKeyObj.n);
 
-    shareStatus.value = 'Encrypting file directly with RSA...';
+    shareStatus.value = 'Encrypting text character by character...';
 
-    // convert file to array buffer (raw bytes) so we can do math on it
-    const fileBuffer = await fileToShare.value.arrayBuffer();
+    // 1. Read the text file directly!
+    const text = await fileToShare.value.text();
 
-    // Convert raw bytes to a single giant BigInt number
-    const m = bufferToBigInt(fileBuffer);
+    // 2. Encrypt each individual character
+    // Example: "Hi" -> 'H' is 72 -> c = 72^e mod n -> "14493"
+    const encryptedArray = Array.from(text).map(char => {
+      // Map character to its Unicode numerical value
+      const m = BigInt(char.charCodeAt(0));
+      // Encrypt
+      const c = modPow(m, e, n);
+      return c.toString();
+    });
 
-    if (m >= n) {
-      shareStatus.value = "Error: File content numerical value is larger than modulus.";
-      return;
+    // 3. Combine into a comma-separated string (e.g. "14493,5534,4432")
+    const encryptedString = encryptedArray.join(',');
+
+    // MATH: Create Digital Signature
+    // Fetch Alice's private key to sign the message
+    const myPrivateKeyText = localStorage.getItem(`privateKey_${myUsername.value}`);
+    const myPrivateKeyObj = JSON.parse(myPrivateKeyText);
+    const myD = BigInt(myPrivateKeyObj.d);
+    const myN = BigInt(myPrivateKeyObj.n);
+
+    // Sum up the string characters to act as a basic educational 'hash'
+    let hash = 0n;
+    for (let i = 0; i < text.length; i++) {
+      hash += BigInt(text.charCodeAt(i));
     }
-
-    // MATH: The core RSA encryption formula directly!
-    // c = m^e (mod n)
-    const c = modPow(m, e, n);
+    // Sign the hash! (S = hash^d mod n)
+    const signature = modPow(hash, myD, myN);
 
     shareStatus.value = 'Uploading...';
-    // creates a form to upload the file
+
     const formData = new FormData();
     formData.append('recipient', recipientUsername.value);
+    formData.append('sender', myUsername.value);
+    formData.append('signature', signature.toString());
 
-    // Represent the ciphertext purely as its stringified integer text inside a blob
-    const fileBlob = new Blob([c.toString()]);
+    // Send the numbers representation as the downloaded blob
+    const fileBlob = new Blob([encryptedString]);
     formData.append('encryptedFile', fileBlob, fileToShare.value.name);
 
-    // send to post request to the api
     const uploadRes = await fetch('http://localhost:3000/api/files/share', {
       method: 'POST', body: formData
     });
@@ -266,7 +226,6 @@ const encryptAndShare = async () => {
 
 // Step 3: Check Inbox
 const checkInbox = async () => {
-  // username from Step 1
   if (!myUsername.value) return;
   try {
     const res = await fetch(`http://localhost:3000/api/files/inbox/${myUsername.value}`);
@@ -283,12 +242,11 @@ const downloadAndDecrypt = async (fileRecord) => {
   try {
     downloadStatus.value = `Downloading ${fileRecord.originalName}...`;
 
-    // fetch the raw encrypted file text (which is just a massive integer string)
+    // 1. Fetch the raw encrypted text file (which contains "14493,5534,4432")
     const fileRes = await fetch(`http://localhost:3000/api/files/download/${fileRecord.fileId}`);
-    const ciphertextString = await fileRes.text();
-    const c = BigInt(ciphertextString);
+    const encryptedString = await fileRes.text();
 
-    // get my local private key
+    // 2. Get my local private key
     const privateKeyText = localStorage.getItem(`privateKey_${myUsername.value}`);
     if (!privateKeyText) throw new Error("Private key missing");
 
@@ -296,21 +254,72 @@ const downloadAndDecrypt = async (fileRecord) => {
     const d = BigInt(myPrivateKeyObj.d);
     const n = BigInt(myPrivateKeyObj.n);
 
-    downloadStatus.value = 'Decrypting file directly with RSA...';
+    downloadStatus.value = 'Decrypting numbers back into letters...';
 
-    // MATH: The core RSA decryption formula directly!
-    // m = c^d (mod n)
-    const m = modPow(c, d, n);
+    // 3. Break string apart and decrypt character by character!
+    const numberStrings = encryptedString.split(',');
 
-    // Convert mathematically decrypted BigInt back into file raw buffer
-    const decryptedFileBuffer = bigIntToBuffer(m);
+    const decryptedArray = numberStrings.map(cText => {
+      if (!cText) return "";
 
-    // prompt download in browser window
-    const blob = new Blob([decryptedFileBuffer]);
+      const c = BigInt(cText);
+      // Decrypt numerical value
+      const m = modPow(c, d, n);
+      // Convert back to character format
+      return String.fromCharCode(Number(m));
+    });
+
+    // 4. Join back into readable text
+    const decryptedText = decryptedArray.join('');
+
+    // VERIFY SIGNATURE:
+    downloadStatus.value = 'Verifying digital signature...';
+    try {
+      // 1. Fetch Alice's public key
+      const senderRes = await fetch(`http://localhost:3000/api/keys/${fileRecord.sender}`);
+      const { publicKey: senderKeyText } = await senderRes.json();
+      const senderKeyObj = JSON.parse(senderKeyText);
+      const senderE = BigInt(senderKeyObj.e);
+      const senderN = BigInt(senderKeyObj.n);
+
+      // 2. Hash our newly decrypted text
+      let calculatedHash = 0n;
+      for (let i = 0; i < decryptedText.length; i++) {
+        calculatedHash += BigInt(decryptedText.charCodeAt(i));
+      }
+
+      // 3. Reverse Alice's signature using her public key (Hash = S^e mod n)
+      const providedSignature = BigInt(fileRecord.signature);
+      const originalHash = modPow(providedSignature, senderE, senderN);
+
+      // 4. Compare!
+      const isValid = (calculatedHash === originalHash && providedSignature !== 0n);
+
+      signatureDetails.value = {
+        sender: fileRecord.sender,
+        signature: providedSignature.toString(),
+        e: senderE.toString(),
+        n: senderN.toString(),
+        calculatedHash: calculatedHash.toString(),
+        originalHash: originalHash.toString(),
+        isValid: isValid
+      };
+
+      if (isValid) {
+        downloadStatus.value = `Success! Valid Signature verified from ${fileRecord.sender}!`;
+      } else {
+        downloadStatus.value = `WARNING: Invalid Signature! File may be tampered with.`;
+      }
+    } catch (err) {
+      downloadStatus.value = `File decrypted, but could not verify signature.`;
+      signatureDetails.value = null;
+    }
+
+    // Prompt user to download result
+    const blob = new Blob([decryptedText]);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    // formating the file name to be downloaded
     a.download = `decrypted_${fileRecord.originalName}`;
     document.body.appendChild(a);
     a.click();
@@ -371,7 +380,7 @@ const downloadAndDecrypt = async (fileRecord) => {
 
       <div v-else class="inbox-list">
         <div v-for="file in myInbox" :key="file.fileId" class="inbox-item">
-          <span>📄 <strong>{{ file.originalName }}</strong></span>
+          <span>📄 <strong>{{ file.originalName }}</strong> <small>(from: {{ file.sender }})</small></span>
           <button @click="downloadAndDecrypt(file)" class="download-btn">
             Decrypt & Download
           </button>
@@ -379,6 +388,39 @@ const downloadAndDecrypt = async (fileRecord) => {
       </div>
 
       <p class="status-msg warning-text">{{ downloadStatus }}</p>
+    </div>
+
+    <!-- Signature Verification Panel -->
+    <div v-if="signatureDetails" class="step-card verification-panel"
+      :class="signatureDetails.isValid ? 'valid-panel' : 'invalid-panel'">
+      <h3>Mathematical Signature Verification</h3>
+      <p><strong>Sender:</strong> {{ signatureDetails.sender }}</p>
+
+      <div class="code-block text-break">
+        <strong>Attached Raw Signature:</strong> <br />
+        {{ signatureDetails.signature }}
+      </div>
+
+      <p><strong>Step 1: Hash Decrypted Text</strong><br />
+        We sum up the numerical characters of the newly decrypted file. <br />
+        <span class="math-text">Expected Hash = {{ signatureDetails.calculatedHash }}</span>
+      </p>
+
+      <p><strong>Step 2: Reverse Signature using Public Key</strong><br />
+        We use the sender's public keys against their signature: <em>Hash = Signature<sup>e</sup> (mod n)</em> <br />
+        <span class="math-text">e = {{ signatureDetails.e }}</span><br />
+        <span class="math-text">n = {{ signatureDetails.n }}</span><br />
+        <span class="math-text">Calculated Hash = {{ signatureDetails.originalHash }}</span>
+      </p>
+
+      <div class="result-banner" :class="signatureDetails.isValid ? 'success-text' : 'warning-text'">
+        <strong v-if="signatureDetails.isValid">
+          ✅ MATCH! Signature is mathematically valid.
+        </strong>
+        <strong v-else>
+          ❌ MISMATCH! File was altered or tampered with.
+        </strong>
+      </div>
     </div>
 
   </main>
@@ -472,6 +514,51 @@ h3 {
 .action-btn:disabled {
   background: #a0aec0;
   cursor: not-allowed;
+}
+
+.code-block {
+  background: #f7fafc;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px dashed #cbd5e0;
+  font-family: monospace;
+  font-size: 0.9rem;
+  margin: 10px 0;
+  overflow-wrap: break-word;
+}
+
+.math-text {
+  font-family: monospace;
+  font-weight: bold;
+  color: #2b6cb0;
+  display: block;
+  margin-top: 4px;
+}
+
+.result-banner {
+  margin-top: 15px;
+  padding: 10px;
+  border-radius: 6px;
+  background: #f0fff4;
+  text-align: center;
+  font-size: 1.05rem;
+}
+
+.result-banner.warning-text {
+  background: #fff5f5;
+  color: #c53030 !important;
+}
+
+.verification-panel.valid-panel {
+  border: 2px solid #68d391;
+}
+
+.verification-panel.invalid-panel {
+  border: 2px solid #fc8181;
+}
+
+.text-break {
+  word-break: break-all;
 }
 
 .cursor-pointer {

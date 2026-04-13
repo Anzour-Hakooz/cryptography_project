@@ -52,16 +52,18 @@ app.get('/api/keys/:username', (req, res) => {
 
 // 3. Upload Encrypted File
 app.post('/api/files/share', upload.single('encryptedFile'), (req, res) => {
-    const { recipient } = req.body; 
+    const { recipient, sender, signature } = req.body; 
     
     const newFile = {
         fileId: req.file.filename,
         originalName: req.file.originalname,
-        recipient: recipient
+        recipient: recipient,
+        sender: sender || "Anonymous",
+        signature: signature || null
     };
     files.push(newFile);
 
-    console.log(`File saved for: ${recipient}`);
+    console.log(`File saved for: ${recipient} from: ${sender}`);
     res.status(201).json({ message: "File uploaded!", fileId: newFile.fileId });
 });
 
