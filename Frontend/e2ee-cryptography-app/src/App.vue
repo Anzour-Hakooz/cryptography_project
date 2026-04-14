@@ -128,7 +128,7 @@ const generateAndRegister = async () => {
     // Save private key safely
     localStorage.setItem(`privateKey_${myUsername.value}`, privateKey);
 
-    // Send public key to the central server
+    // Send public key to the API
     const response = await fetch('http://localhost:3000/api/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -167,7 +167,7 @@ const encryptAndShare = async () => {
 
     shareStatus.value = 'Encrypting text character by character...';
 
-    // 1. Read the text file directly!
+    // 1. Read the text file directly
     const text = await fileToShare.value.text();
 
     // 2. Encrypt each individual character
@@ -184,7 +184,7 @@ const encryptAndShare = async () => {
     const encryptedString = encryptedArray.join(',');
 
     // MATH: Create Digital Signature
-    // Fetch Alice's private key to sign the message
+    // Fetch Bob's private key to sign the message
     const myPrivateKeyText = localStorage.getItem(`privateKey_${myUsername.value}`);
     const myPrivateKeyObj = JSON.parse(myPrivateKeyText);
     const myD = BigInt(myPrivateKeyObj.d);
